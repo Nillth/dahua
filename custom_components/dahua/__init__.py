@@ -125,6 +125,17 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
         self._max_streams = 3  # 1 main stream + 2 sub-streams by default
 
         self._supports_lighting_v2 = False
+        self._supports_strobe_light = False
+        self._strobe_light_enable_keys = []
+        self._strobe_light_config_paths = []
+
+        # Per-rule IVS data
+        self._ivs_rules: list = []
+        self._ivs_config_name: str = ""
+
+        # NTP and Network support
+        self._supports_ntp = False
+        self._supports_network = False
 
         # channel_number is not the channel_index. channel_number is the index + 1.
         # So channel index 0 is channel number 1. Except for some older firmwares where channel
@@ -339,6 +350,166 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
                     pass
                 _LOGGER.info("Device supports Lighting_V2=%s", self._supports_lighting_v2)
 
+                # Check for strobe light support (LightingLink in IVS rules)
+                # Fetch only this channel's rules to avoid huge responses (full config can be 500KB+)
+                try:
+                    for config_name in ["VideoAnalyseRule", "RemoteVideoAnalyseRule"]:
+                        try:
+                            result = await self.client.async_get_config(
+                                "{0}[{1}]".format(config_name, self._channel)
+                            )
+                            keys = [k for k in result if "LightingLink.Enable" in k and "ExternalHandler" not in k]
+                            if keys:
+                                self._strobe_light_enable_keys = keys
+                                self._strobe_light_config_paths = list(set(
+                                    k.replace("table.", "").rsplit(".Enable", 1)[0]
+                                    for k in keys
+                                ))
+                                self._supports_strobe_light = True
+                                break
+                        except ClientError:
+                            pass
+                except Exception:
+                    pass
+                _LOGGER.info("Device supports strobe light=%s", self._supports_strobe_light)
+
+                # Discover per-rule IVS data for this channel
+                try:
+                    self._ivs_rules = []
+                    for config_name in ["RemoteVideoAnalyseRule", "VideoAnalyseRule"]:
+                        try:
+                            result = await self.client.async_get_config(
+                                "{0}[{1}]".format(config_name, self._channel)
+                            )
+                            if not result:
+                                continue
+
+                            # Find all rule indices that have a Name field
+                            rule_indices = set()
+                            for k in result:
+                                if k.endswith(".Name"):
+                                    parts = k.split("[")
+                                    if len(parts) >= 3:
+                                        try:
+                                            idx = int(parts[2].split("]")[0])
+                                            rule_indices.add(idx)
+                                        except (ValueError, IndexError):
+                                            pass
+
+                            if not rule_indices:
+                                continue
+
+                            self._ivs_config_name = config_name
+                            is_remote = config_name == "RemoteVideoAnalyseRule"
+                            prefix = "table.{0}[{1}]".format(config_name, self._channel)
+
+                            for idx in sorted(rule_indices):
+                                rule_prefix = "{0}[{1}]".format(prefix, idx)
+                                name = result.get("{0}.Name".format(rule_prefix), "")
+                                rule_type = result.get("{0}.Type".format(rule_prefix), "")
+
+                                if not name:
+                                    continue
+
+                                # Determine LightingLink location
+                                has_lighting_link = False
+                                ll_prefix = ""
+                                if is_remote:
+                                    ll_key = "{0}.RemoteEventHandler.LightingLink.Enable".format(rule_prefix)
+                                    if ll_key in result:
+                                        has_lighting_link = True
+                                        ll_prefix = "{0}[{1}][{2}].RemoteEventHandler.LightingLink".format(
+                                            config_name, self._channel, idx
+                                        )
+                                else:
+                                    ll_key = "{0}.EventHandler.LightingLink.Enable".format(rule_prefix)
+                                    if ll_key in result:
+                                        has_lighting_link = True
+                                        ll_prefix = "{0}[{1}][{2}].EventHandler.LightingLink".format(
+                                            config_name, self._channel, idx
+                                        )
+
+                                # Determine VoiceEnable location
+                                has_voice = False
+                                voice_key = ""
+                                if is_remote:
+                                    vk = "{0}.RemoteEventHandler.VoiceEnable".format(rule_prefix)
+                                    if vk in result:
+                                        has_voice = True
+                                        voice_key = "{0}[{1}][{2}].RemoteEventHandler.VoiceEnable".format(
+                                            config_name, self._channel, idx
+                                        )
+                                else:
+                                    vk = "{0}.EventHandler.VoiceEnable".format(rule_prefix)
+                                    if vk in result:
+                                        has_voice = True
+                                        voice_key = "{0}[{1}][{2}].EventHandler.VoiceEnable".format(
+                                            config_name, self._channel, idx
+                                        )
+
+                                # Determine event handler prefix (for record/snapshot/alarm/beep switches)
+                                if is_remote:
+                                    eh_prefix = "{0}[{1}][{2}].RemoteEventHandler".format(
+                                        config_name, self._channel, idx
+                                    )
+                                else:
+                                    eh_prefix = "{0}[{1}][{2}].EventHandler".format(
+                                        config_name, self._channel, idx
+                                    )
+
+                                # Check for Config.Sensitivity
+                                has_sensitivity = False
+                                sensitivity_key = ""
+                                sk = "{0}.Config.Sensitivity".format(rule_prefix)
+                                if sk in result:
+                                    has_sensitivity = True
+                                    sensitivity_key = "{0}[{1}][{2}].Config.Sensitivity".format(
+                                        config_name, self._channel, idx
+                                    )
+
+                                rule_data = {
+                                    "index": idx,
+                                    "name": name,
+                                    "type": rule_type,
+                                    "config_name": config_name,
+                                    "channel": self._channel,
+                                    "enable_key": "{0}[{1}][{2}].Enable".format(
+                                        config_name, self._channel, idx
+                                    ),
+                                    "has_lighting_link": has_lighting_link,
+                                    "lighting_link_prefix": ll_prefix,
+                                    "is_remote": is_remote,
+                                    "has_voice": has_voice,
+                                    "voice_key": voice_key,
+                                    "event_handler_prefix": eh_prefix,
+                                    "has_sensitivity": has_sensitivity,
+                                    "sensitivity_key": sensitivity_key,
+                                }
+                                self._ivs_rules.append(rule_data)
+
+                            if self._ivs_rules:
+                                break
+                        except ClientError:
+                            pass
+                except Exception:
+                    pass
+                _LOGGER.info("Discovered %s IVS rules for channel %s", len(self._ivs_rules), self._channel)
+
+                # Probe NTP support
+                try:
+                    await self.client.async_get_ntp_config()
+                    self._supports_ntp = True
+                except ClientError:
+                    self._supports_ntp = False
+                _LOGGER.info("Device supports NTP=%s", self._supports_ntp)
+
+                # Probe Network support
+                try:
+                    await self.client.async_get_network_config()
+                    self._supports_network = True
+                except ClientError:
+                    self._supports_network = False
+                _LOGGER.info("Device supports Network=%s", self._supports_network)
 
                 if not is_doorbell:
                     # Start the event listeners for IP cameras
@@ -420,6 +591,41 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
                 coros.append(asyncio.ensure_future(self.client.async_get_light_global_enabled()))
             if self._supports_lighting_v2:   #add lighing_v2 API if it is supported
                 coros.append(asyncio.ensure_future(self.client.async_get_lighting_v2()))
+            if self._supports_strobe_light:
+                for path in self._strobe_light_config_paths:
+                    coros.append(asyncio.ensure_future(self.client.async_get_config(path)))
+
+            # Poll per-rule IVS data
+            for rule in self._ivs_rules:
+                cn = rule["config_name"]
+                ch = rule["channel"]
+                idx = rule["index"]
+                # Fetch Enable and EventHandler/RemoteEventHandler fields for this rule
+                rule_path = "{0}[{1}][{2}]".format(cn, ch, idx)
+                coros.append(asyncio.ensure_future(self.client.async_get_config(rule_path + ".Enable")))
+                if rule["has_lighting_link"]:
+                    coros.append(asyncio.ensure_future(
+                        self.client.async_get_config(rule["lighting_link_prefix"])
+                    ))
+                if rule["has_voice"]:
+                    coros.append(asyncio.ensure_future(
+                        self.client.async_get_config(rule["voice_key"])
+                    ))
+                if rule["has_sensitivity"]:
+                    coros.append(asyncio.ensure_future(
+                        self.client.async_get_config(rule["sensitivity_key"])
+                    ))
+                # Poll event handler booleans
+                eh = rule["event_handler_prefix"]
+                for prop in ["RecordEnable", "SnapshotEnable", "AlarmOutEnable", "BeepEnable"]:
+                    coros.append(asyncio.ensure_future(
+                        self.client.async_get_config("{0}.{1}".format(eh, prop))
+                    ))
+
+            if self._supports_ntp:
+                coros.append(asyncio.ensure_future(self.client.async_get_ntp_config()))
+            if self._supports_network:
+                coros.append(asyncio.ensure_future(self.client.async_get_network_config()))
 
 
             # Gather results and update the data map
@@ -777,6 +983,17 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
         """Return true if the security light is on. This is the red/blue flashing light"""
         return self.get_status_value("WhiteLight").lower() == "on"
 
+    def supports_strobe_light(self) -> bool:
+        """Returns true if this device has strobe/lighting link support on IVS rules"""
+        return self._supports_strobe_light
+
+    def is_strobe_light_on(self) -> bool:
+        """Returns true if any IVS rule lighting link is enabled"""
+        for key in self._strobe_light_enable_keys:
+            if self.data.get(key, "").lower() == "true":
+                return True
+        return False
+
     def get_profile_mode(self) -> str:
         # profile_mode 0=day, 1=night, 2=scene
         return self._profile_mode
@@ -821,6 +1038,37 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
         if v is None:
            v = self.data.get(f"status.{key}", "")
         return v
+
+    def get_ivs_rules(self) -> list:
+        """Returns the list of discovered IVS rules for this channel"""
+        return self._ivs_rules
+
+    def supports_ntp(self) -> bool:
+        return self._supports_ntp
+
+    def supports_network(self) -> bool:
+        return self._supports_network
+
+    def get_ntp_enabled(self) -> bool:
+        return self.data.get("table.NTP.Enable", "").lower() == "true"
+
+    def get_ntp_server(self) -> str:
+        return self.data.get("table.NTP.Address", "")
+
+    def get_network_ip(self) -> str:
+        return self.data.get("table.Network.eth0.IPAddress", "")
+
+    def get_network_mac(self) -> str:
+        return self.data.get("table.Network.eth0.PhysicalAddress", "")
+
+    def get_smd_sensitivity(self) -> str:
+        return self.data.get("table.SmartMotionDetect[{0}].Sensitivity".format(self._channel), "")
+
+    def is_smd_human_enabled(self) -> bool:
+        return self.data.get("table.SmartMotionDetect[{0}].ObjectTypes.Human".format(self._channel), "").lower() == "true"
+
+    def is_smd_vehicle_enabled(self) -> bool:
+        return self.data.get("table.SmartMotionDetect[{0}].ObjectTypes.Vehicle".format(self._channel), "").lower() == "true"
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Handle removal of an entry."""

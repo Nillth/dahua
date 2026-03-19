@@ -203,6 +203,21 @@ class DahuaClient:
         except aiohttp.ClientResponseError as e:
             return {}
 
+    async def async_set_config(self, key: str, value) -> dict:
+        """Generic config setter. key should not include 'table.' prefix.
+        Example: async_set_config('NTP.Enable', 'true')
+        """
+        url = "/cgi-bin/configManager.cgi?action=setConfig&{0}={1}".format(key, value)
+        return await self.get(url, True)
+
+    async def async_get_ntp_config(self) -> dict:
+        """Get NTP configuration"""
+        return await self.async_get_config("NTP")
+
+    async def async_get_network_config(self) -> dict:
+        """Get Network configuration"""
+        return await self.async_get_config("Network")
+
     async def async_get_config_lighting(self, channel: int, profile_mode) -> dict:
         """
         async_get_config_lighting will fetch the status of the IR light (InfraRed light)
@@ -254,6 +269,18 @@ class DahuaClient:
         table.VideoAnalyseRule[0][1].Name=IVS-1
         """
         return await self.async_get_config("VideoAnalyseRule")
+
+    async def async_set_ivs_lighting_link(self, lighting_link_keys: list, enabled: bool):
+        """Enables or disables the strobe/lighting link on IVS rules.
+        lighting_link_keys: list of full table keys like 'table.VideoAnalyseRule[0][4].EventHandler.LightingLink.Enable'
+        """
+        params = []
+        for key in lighting_link_keys:
+            config_key = key.replace("table.", "")
+            params.append("{0}={1}".format(config_key, str(enabled).lower()))
+        if params:
+            url = "/cgi-bin/configManager.cgi?action=setConfig&" + "&".join(params)
+            return await self.get(url, True)
 
     async def async_set_all_ivs_rules(self, channel: int, enabled: bool):
         """

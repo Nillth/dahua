@@ -15,6 +15,11 @@ INFRARED_ICON = "mdi:weather-night"
 DISARMING_ICON = "mdi:alarm-check"
 VOLUME_HIGH_ICON = "mdi:volume-high"
 BELL_ICON = "mdi:bell-ring"
+IVS_RULE_ICON = "mdi:cctv"
+STROBE_ICON = "mdi:alarm-light"
+VOICE_ALERT_ICON = "mdi:bullhorn-variant"
+NTP_ICON = "mdi:clock-check-outline"
+NETWORK_ICON = "mdi:lan"
 
 # Device classes - https://www.home-assistant.io/integrations/binary_sensor/#device-class
 MOTION_SENSOR_DEVICE_CLASS = "motion"
@@ -29,7 +34,9 @@ SWITCH = "switch"
 LIGHT = "light"
 CAMERA = "camera"
 SELECT = "select"
-PLATFORMS = [BINARY_SENSOR, SWITCH, LIGHT, CAMERA, SELECT]
+SENSOR = "sensor"
+NUMBER = "number"
+PLATFORMS = [BINARY_SENSOR, SWITCH, LIGHT, CAMERA, SELECT, SENSOR, NUMBER]
 
 
 # Configuration and options
